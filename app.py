@@ -20,7 +20,7 @@ LOCAL_TZ = ZoneInfo("America/Denver")
 def generate_synthetic_data(days=30):
     """
     Generates a synthetic dataset containing hourly weather observations 
-    (Fahrenheit, inches/hour, mph) and corresponding retail foot traffic.
+    (Fahrenheit, inches/hour, mph) and retail foot traffic.
     """
     now_mst = datetime.now(LOCAL_TZ)
     start_date = now_mst - timedelta(days=days)
@@ -51,16 +51,12 @@ def generate_synthetic_data(days=30):
     # Weekend volume boost (1.5x)
     weekend_multiplier = np.where(df['day_of_week'] >= 5, 1.5, 1.0)
     
-    # Temperature impact: penalize freezing (< 35°F) or extreme heat (> 95°F)
+    # Weather penalty calculations
     temp_penalty = np.where(df['temp_f'] < 35.0, 0.7, np.where(df['temp_f'] > 95.0, 0.8, 1.0))
-    
-    # Rain impact: heavy (> 0.25 in/hr), light (> 0.05 in/hr)
     precip_penalty = np.where(
         df['precip_in_hr'] > 0.25, 0.35,
         np.where(df['precip_in_hr'] > 0.05, 0.75, 1.0)
     )
-    
-    # Wind impact: high winds (> 20 mph) introduce friction
     wind_penalty = np.where(df['wind_mph'] > 20.0, 0.8, 1.0)
     
     # Calculate visitor count with Poisson distribution
@@ -94,16 +90,16 @@ def train_model(df):
 st.set_page_config(page_title="Retail Traffic Prediction", layout="wide")
 st.title("Near-Term Foot Traffic & Weather Analysis")
 
-# Store timestamp in MST/MDT
+# Pinned store timestamp
 now_mst = datetime.now(LOCAL_TZ)
 formatted_now = now_mst.strftime("%A, %B %d, %Y - %I:%M %p %Z")
 st.caption(f"Current Store Time: **{formatted_now}**")
 
-# Data preparation and model training
+# Prepare data and model
 data = generate_synthetic_data()
 model = train_model(data)
 
-# Generate predictions across the historical set for comparison
+# Historical predictions for validation
 features = ['hour', 'day_of_week', 'temp_f', 'precip_in_hr', 'wind_mph']
 data['predicted_count'] = model.predict(data[features]).round().astype(int)
 
@@ -127,7 +123,7 @@ input_temp_f = st.sidebar.slider("Temperature (°F)", -10.0, 110.0, 68.0, step=1
 input_precip_in = st.sidebar.slider("Precipitation (in/hr)", 0.0, 2.0, 0.0, step=0.01, format="%.2f")
 input_wind_mph = st.sidebar.slider("Wind Speed (mph)", 0.0, 60.0, 8.0, step=1.0)
 
-# Build feature set for upcoming inference
+# Build feature set for incoming inference
 forecast_df = pd.DataFrame({
     'hour': [target_hour],
     'day_of_week': [now_mst.weekday()],
@@ -162,10 +158,9 @@ st.markdown("---")
 # ------------------------------------------------------------------------
 st.subheader("Historical Validation: Actual vs. Predicted Traffic & Weather Dynamics")
 
-# Subset to the last 5 days for clear viewing
 recent_data = data.tail(24 * 5).copy()
 
-# Melt actual and predicted for multi-line plotting
+# Melt actual and predicted for plotting
 traffic_melted = recent_data.melt(
     id_vars=['timestamp'], 
     value_vars=['visitor_count', 'predicted_count'],
@@ -177,14 +172,22 @@ traffic_melted['Metric'] = traffic_melted['Metric'].map({
     'predicted_count': 'Model Predicted Traffic'
 })
 
-# Define shared selection for interactive x-axis zoom/pan synchronization
+# Shared horizontal selection for synchronized pan/zoom
 shared_zoom = alt.selection_interval(bind='scales', encodings=['x'])
 
-# Subplot 1: Foot Traffic (Actual vs. Predicted)
-traffic_chart = alt.Chart(traffic_melted).mark_line().encode(
+# Subplot 1: Foot Traffic (Actual in Green, Predicted in Orange)
+traffic_chart = alt.Chart(traffic_melted).mark_line(strokeWidth=2).encode(
     x=alt.X('timestamp:T', title=None, axis=alt.Axis(labels=False, ticks=False)),
     y=alt.Y('Visitors:Q', title='Store Visitors'),
-    color=alt.Color('Metric:N', title=None, legend=alt.Legend(orient='top-left')),
+    color=alt.Color(
+        'Metric:N', 
+        title=None, 
+        scale=alt.Scale(
+            domain=['Actual Foot Traffic', 'Model Predicted Traffic'],
+            range=['#2e7d32', '#e65100']  # Explicit Green vs Orange
+        ),
+        legend=alt.Legend(orient='top-left')
+    ),
     tooltip=[
         alt.Tooltip('timestamp:T', title='Time', format='%b %d, %I:%M %p'),
         alt.Tooltip('Metric:N', title='Series'),
@@ -197,7 +200,7 @@ traffic_chart = alt.Chart(traffic_melted).mark_line().encode(
 )
 
 # Subplot 2A: Precipitation (Bar Chart)
-precip_chart = alt.Chart(recent_data).mark_bar(opacity=0.6).encode(
+precip_chart = alt.Chart(recent_data).mark_bar(opacity=0.6, color='#1e88e5').encode(
     x=alt.X('timestamp:T', title='Date & Time (MST)', axis=alt.Axis(format='%b %d, %I %p')),
     y=alt.Y('precip_in_hr:Q', title='Precipitation (in/hr)', scale=alt.Scale(zero=True)),
     tooltip=[
@@ -208,8 +211,8 @@ precip_chart = alt.Chart(recent_data).mark_bar(opacity=0.6).encode(
     ]
 )
 
-# Subplot 2B: Temperature (Line Chart overlaying the weather subplot)
-temp_chart = alt.Chart(recent_data).mark_line(strokeDash=[4, 4]).encode(
+# Subplot 2B: Temperature (Dashed Line on Right Axis)
+temp_chart = alt.Chart(recent_data).mark_line(strokeDash=[4, 4], color='#d32f2f').encode(
     x=alt.X('timestamp:T'),
     y=alt.Y('temp_f:Q', title='Temperature (°F)', scale=alt.Scale(zero=False), axis=alt.Axis(orient='right')),
     tooltip=[
@@ -226,12 +229,14 @@ weather_combined = alt.layer(precip_chart, temp_chart).resolve_scale(
     shared_zoom
 )
 
-# Vertically concatenate the synchronized charts
+# Stack vertically with synchronized x-axis and auto-fit container width
 synchronized_dashboard = alt.vconcat(
     traffic_chart, 
     weather_combined
 ).resolve_scale(
     x='shared'
+).properties(
+    autosize=alt.AutoSizeParams(type='fit-x', contains='padding')
 )
 
 st.altair_chart(synchronized_dashboard, use_container_width=True)
