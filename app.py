@@ -37,7 +37,7 @@ def generate_synthetic_data(days=30):
     df['wind_10m'] = np.abs(np.random.normal(3, 2, len(df)))
     
     # Generate baseline foot traffic (business hours 9 AM - 9 PM)
-    baseline_traffic = np.where((df['hour'] >= 9) & (df['hour'] <= 21), 50, 5)
+    baseline_traffic = np.where((df['hour'] >= 9) & (df['hour'] <= 21), 50, 0)
     
     # Weekend multiplier (traffic increases on Saturdays and Sundays)
     weekend_multiplier = np.where(df['day_of_week'] >= 5, 1.5, 1.0)
