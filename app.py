@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import altair as alt
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -19,7 +20,7 @@ LOCAL_TZ = ZoneInfo("America/Denver")
 def generate_synthetic_data(days=30):
     """
     Generates a synthetic dataset containing hourly weather observations 
-    (Fahrenheit, inches/hour, miles per hour) and retail foot traffic.
+    (Fahrenheit, inches/hour, mph) and corresponding retail foot traffic.
     """
     now_mst = datetime.now(LOCAL_TZ)
     start_date = now_mst - timedelta(days=days)
@@ -59,10 +60,10 @@ def generate_synthetic_data(days=30):
         np.where(df['precip_in_hr'] > 0.05, 0.75, 1.0)
     )
     
-    # Wind impact: high winds (> 20 mph) introduce foot traffic friction
+    # Wind impact: high winds (> 20 mph) introduce friction
     wind_penalty = np.where(df['wind_mph'] > 20.0, 0.8, 1.0)
     
-    # Calculate visitor count
+    # Calculate visitor count with Poisson distribution
     expected_traffic = baseline_traffic * weekend_multiplier * temp_penalty * precip_penalty * wind_penalty
     df['visitor_count'] = np.random.poisson(expected_traffic)
     
@@ -91,23 +92,26 @@ def train_model(df):
 # Streamlit UI Configuration
 # ------------------------------------------------------------------------
 st.set_page_config(page_title="Retail Traffic Prediction", layout="wide")
-st.title("Near-Term Foot Traffic Prediction Dashboard")
+st.title("Near-Term Foot Traffic & Weather Analysis")
 
-# Current timestamp pinned to Mountain Time
+# Store timestamp in MST/MDT
 now_mst = datetime.now(LOCAL_TZ)
 formatted_now = now_mst.strftime("%A, %B %d, %Y - %I:%M %p %Z")
 st.caption(f"Current Store Time: **{formatted_now}**")
 
-# Prepare data and trained estimator
+# Data preparation and model training
 data = generate_synthetic_data()
 model = train_model(data)
+
+# Generate predictions across the historical set for comparison
+features = ['hour', 'day_of_week', 'temp_f', 'precip_in_hr', 'wind_mph']
+data['predicted_count'] = model.predict(data[features]).round().astype(int)
 
 # ------------------------------------------------------------------------
 # Sidebar Forecast Controls
 # ------------------------------------------------------------------------
 st.sidebar.header("Forecast Settings")
 
-# Time of day selection (defaults to current MST hour)
 target_hour = st.sidebar.slider(
     "Target Forecast Hour (0:00 - 23:00)", 
     min_value=0, 
@@ -119,12 +123,11 @@ target_hour = st.sidebar.slider(
 st.sidebar.markdown("---")
 st.sidebar.subheader("Hypothetical Weather Conditions")
 
-# Weather input controls in Imperial units
 input_temp_f = st.sidebar.slider("Temperature (°F)", -10.0, 110.0, 68.0, step=1.0)
 input_precip_in = st.sidebar.slider("Precipitation (in/hr)", 0.0, 2.0, 0.0, step=0.01, format="%.2f")
 input_wind_mph = st.sidebar.slider("Wind Speed (mph)", 0.0, 60.0, 8.0, step=1.0)
 
-# Build feature set for inference
+# Build feature set for upcoming inference
 forecast_df = pd.DataFrame({
     'hour': [target_hour],
     'day_of_week': [now_mst.weekday()],
@@ -133,10 +136,8 @@ forecast_df = pd.DataFrame({
     'wind_mph': [input_wind_mph]
 })
 
-# Predict visitor count
 predicted_count = int(model.predict(forecast_df)[0])
 
-# Classify weather condition
 if input_precip_in >= 0.25:
     weather_desc = "Adverse Weather"
 elif input_precip_in >= 0.05:
@@ -144,7 +145,6 @@ elif input_precip_in >= 0.05:
 else:
     weather_desc = "Clear"
 
-# Historical average for selected target hour
 hist_avg = int(data[data['hour'] == target_hour]['visitor_count'].mean())
 
 # ------------------------------------------------------------------------
@@ -155,9 +155,83 @@ col1.metric(f"Predicted Visitors ({target_hour:02d}:00)", f"{predicted_count}")
 col2.metric(f"Historical Avg ({target_hour:02d}:00)", f"{hist_avg}")
 col3.metric("Weather Condition", weather_desc)
 
+st.markdown("---")
+
 # ------------------------------------------------------------------------
-# Historical Trend Chart
+# Synchronized Altair Visualizations
 # ------------------------------------------------------------------------
-st.subheader("Historical Traffic Pattern (Last 7 Days)")
-recent_data = data.tail(24 * 7).set_index('timestamp')
-st.line_chart(recent_data[['visitor_count']])
+st.subheader("Historical Validation: Actual vs. Predicted Traffic & Weather Dynamics")
+
+# Subset to the last 5 days for clear viewing
+recent_data = data.tail(24 * 5).copy()
+
+# Melt actual and predicted for multi-line plotting
+traffic_melted = recent_data.melt(
+    id_vars=['timestamp'], 
+    value_vars=['visitor_count', 'predicted_count'],
+    var_name='Metric', 
+    value_name='Visitors'
+)
+traffic_melted['Metric'] = traffic_melted['Metric'].map({
+    'visitor_count': 'Actual Foot Traffic',
+    'predicted_count': 'Model Predicted Traffic'
+})
+
+# Define shared selection for interactive x-axis zoom/pan synchronization
+shared_zoom = alt.selection_interval(bind='scales', encodings=['x'])
+
+# Subplot 1: Foot Traffic (Actual vs. Predicted)
+traffic_chart = alt.Chart(traffic_melted).mark_line().encode(
+    x=alt.X('timestamp:T', title=None, axis=alt.Axis(labels=False, ticks=False)),
+    y=alt.Y('Visitors:Q', title='Store Visitors'),
+    color=alt.Color('Metric:N', title=None, legend=alt.Legend(orient='top-left')),
+    tooltip=[
+        alt.Tooltip('timestamp:T', title='Time', format='%b %d, %I:%M %p'),
+        alt.Tooltip('Metric:N', title='Series'),
+        alt.Tooltip('Visitors:Q', title='Count')
+    ]
+).properties(
+    height=260
+).add_params(
+    shared_zoom
+)
+
+# Subplot 2A: Precipitation (Bar Chart)
+precip_chart = alt.Chart(recent_data).mark_bar(opacity=0.6).encode(
+    x=alt.X('timestamp:T', title='Date & Time (MST)', axis=alt.Axis(format='%b %d, %I %p')),
+    y=alt.Y('precip_in_hr:Q', title='Precipitation (in/hr)', scale=alt.Scale(zero=True)),
+    tooltip=[
+        alt.Tooltip('timestamp:T', title='Time', format='%b %d, %I:%M %p'),
+        alt.Tooltip('precip_in_hr:Q', title='Precipitation (in/hr)', format='.2f'),
+        alt.Tooltip('temp_f:Q', title='Temp (°F)', format='.1f'),
+        alt.Tooltip('wind_mph:Q', title='Wind (mph)', format='.1f')
+    ]
+)
+
+# Subplot 2B: Temperature (Line Chart overlaying the weather subplot)
+temp_chart = alt.Chart(recent_data).mark_line(strokeDash=[4, 4]).encode(
+    x=alt.X('timestamp:T'),
+    y=alt.Y('temp_f:Q', title='Temperature (°F)', scale=alt.Scale(zero=False), axis=alt.Axis(orient='right')),
+    tooltip=[
+        alt.Tooltip('timestamp:T', title='Time', format='%b %d, %I:%M %p'),
+        alt.Tooltip('temp_f:Q', title='Temp (°F)', format='.1f')
+    ]
+)
+
+weather_combined = alt.layer(precip_chart, temp_chart).resolve_scale(
+    y='independent'
+).properties(
+    height=160
+).add_params(
+    shared_zoom
+)
+
+# Vertically concatenate the synchronized charts
+synchronized_dashboard = alt.vconcat(
+    traffic_chart, 
+    weather_combined
+).resolve_scale(
+    x='shared'
+)
+
+st.altair_chart(synchronized_dashboard, use_container_width=True)
